@@ -1,1 +1,1786 @@
-# majidposhtvan
+import sys
+import cv2
+import numpy as np
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QLabel, QFrame, QPushButton, QHBoxLayout, QVBoxLayout,
+    QFileDialog, QSplitter, QStyleFactory, QStackedLayout, QSlider, QSizePolicy, QSpacerItem,
+    QLineEdit, QScrollArea, QGridLayout, QMessageBox, QScrollBar
+)
+from PyQt5.QtCore import Qt, QUrl, QSize, QMimeData, QTimer, QThread, pyqtSignal, QEventLoop, QPoint, QRect
+from PyQt5.QtGui import QIcon, QPainter, QColor, QFont, QFontMetrics, QWheelEvent, QMouseEvent, QKeyEvent, QPixmap, QDrag, QImage
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtMultimediaWidgets import QVideoWidget
+
+ICON_PATH = r"E:\MPEditor\Icon"
+VIDEO_FORMATS = [
+    "mp4", "mov", "avi", "mkv", "webm", "m4v", "flv"
+]
+IMAGE_FORMATS = [
+    "jpg", "jpeg", "png", "bmp", "gif"
+]
+
+def get_video_filter():
+    return "Video Files (" + " ".join(f"*.{ext}" for ext in VIDEO_FORMATS + IMAGE_FORMATS) + ")"
+
+def get_video_duration_seconds(file_path):
+    try:
+        cap = cv2.VideoCapture(file_path)
+        if not cap.isOpened():
+            return 10
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        if fps > 0 and frame_count > 0:
+            duration = frame_count / fps
+            cap.release()
+            return float(duration)
+        cap.release()
+    except Exception:
+        pass
+    return 10
+
+class LabeledFrame(QFrame):
+    def __init__(self, name, extra_widget=None, main_widget=None, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #232326;
+                border: 2px solid #333;
+                border-radius: 8px;
+            }
+            QLabel {
+                color: #ddd;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton {
+                background-color: #333;
+                color: #fff;
+                border: none;
+                padding: 5px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #444;
+            }
+        """)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        self.header_layout = QVBoxLayout()
+        self.header_layout.setSpacing(0)
+        main_layout.addLayout(self.header_layout)
+        if main_widget:
+            main_layout.addWidget(main_widget, stretch=1)
+        else:
+            main_layout.addStretch()
+        title_layout = QHBoxLayout()
+        title_layout.setContentsMargins(8, 8, 8, 0)
+        if extra_widget:
+            title_layout.addWidget(extra_widget, alignment=Qt.AlignLeft)
+        title_layout.addStretch()
+        label = QLabel(name)
+        title_layout.addWidget(label, alignment=Qt.AlignRight | Qt.AlignTop)
+        self.header_layout.addLayout(title_layout)
+
+    def add_top_widget(self, widget):
+        self.header_layout.insertWidget(0, widget)
+
+    def insert_widget_above_title(self, widget):
+        self.header_layout.insertWidget(0, widget)
+
+class MediaIconLabel(QLabel):
+    def __init__(self, file_path, pixmap, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.setFixedSize(48, 64)
+        self.setPixmap(pixmap.scaled(48, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.setStyleSheet("background:#444;border:1px solid #222;")
+        self.setToolTip(file_path.split("/")[-1])
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            mime_data = QMimeData()
+            mime_data.setText(self.file_path)
+            drag = QDrag(self)
+            drag.setMimeData(mime_data)
+            drag.setPixmap(self.pixmap())
+            drag.exec_(Qt.CopyAction)
+
+class DraggableMediaIcon(MediaIconLabel):
+    def __init__(self, file_path, pixmap, parent=None):
+        super().__init__(file_path, pixmap, parent)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton:
+            mime_data = QMimeData()
+            mime_data.setText(self.file_path)
+            drag = QDrag(self)
+            drag.setMimeData(mime_data)
+            drag.setPixmap(self.pixmap())
+            drag.exec_(Qt.CopyAction)
+
+class MediaIconsScrollArea(QScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.scroll_widget = QWidget()
+        self.grid_layout = QGridLayout(self.scroll_widget)
+        self.grid_layout.setSpacing(8)
+        self.grid_layout.setContentsMargins(8, 4, 8, 4)
+        self.setWidget(self.scroll_widget)
+        self._icons = []
+        self.setAcceptDrops(True)
+
+    def add_media_icon(self, icon_widget):
+        row = len(self._icons) // 4
+        col = len(self._icons) % 4
+        self.grid_layout.addWidget(icon_widget, row, col)
+        self._icons.append(icon_widget)
+
+    def clear_icons(self):
+        for i in reversed(range(self.grid_layout.count())):
+            widget = self.grid_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        self._icons = []
+
+    def filter_icons(self, search_text):
+        for icon in self._icons:
+            base = icon.file_path.split("/")[-1].lower()
+            icon.setVisible(search_text.lower() in base)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        file_paths = []
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                file_paths.append(url.toLocalFile())
+        elif event.mimeData().hasText():
+            file_paths = [event.mimeData().text()]
+
+        for path in file_paths:
+            ext = path.split('.')[-1].lower()
+            if ext in VIDEO_FORMATS + IMAGE_FORMATS:
+                if ext in IMAGE_FORMATS:
+                    pixmap = QPixmap(path)
+                    if pixmap.isNull():
+                        pixmap = QPixmap(48, 64)
+                        pixmap.fill(QColor("#444"))
+                else:
+                    pixmap = QPixmap(f"{ICON_PATH}/video-file.png")
+                icon = DraggableMediaIcon(path, pixmap)
+                self.add_media_icon(icon)
+        event.acceptProposedAction()
+
+class TimelineClip(QLabel):
+    HANDLE_WIDTH = 8
+
+    def __init__(self, file_path, pixmap, duration_sec, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.full_duration_sec = duration_sec
+        self.duration_sec = duration_sec
+        self.start_sec = 0
+        self.trim_in = 0
+        self.trim_out = duration_sec
+        self.setStyleSheet("background:#1a90ff;color:#fff;border-radius:6px;border:2px solid #0b4c90;")
+        self.thumb = QLabel(self)
+        self.thumb.setPixmap(pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.thumb.setGeometry(4, 4, 40, 40)
+        self.name = QLabel(file_path.split("/")[-1], self)
+        self.name.setGeometry(48, 12, 100, 24)
+        self.name.setStyleSheet("color:#fff;")
+        self.name.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.dragging = False
+        self.resizing_left = False
+        self.resizing_right = False
+        self.offset_x = 0
+        self.selected = False
+        self.setFocusPolicy(Qt.ClickFocus)
+        self.setCursor(Qt.ArrowCursor)
+
+    def update_geometry(self, px_per_sec, scroll_offset, left_margin, height):
+        x = int((self.start_sec - scroll_offset) * px_per_sec) + left_margin
+        w = max(30, int(self.duration_sec * px_per_sec))
+        self.setGeometry(x, 6, w, height-12)
+        self.thumb.setGeometry(4, 4, 40, self.height()-8)
+        self.name.setGeometry(48, 12, self.width()-52, 24)
+        self.raise_()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            local_x = event.x()
+            if 0 <= local_x <= self.HANDLE_WIDTH:
+                self.resizing_left = True
+                self.resize_start_x = local_x
+                self.orig_trim_in = self.trim_in
+                self.orig_start_sec = self.start_sec
+                self.orig_duration = self.duration_sec
+                self.setCursor(Qt.SizeHorCursor)
+            elif self.width() - self.HANDLE_WIDTH <= local_x <= self.width():
+                self.resizing_right = True
+                self.resize_start_x = local_x
+                self.orig_trim_out = self.trim_out
+                self.orig_duration = self.duration_sec
+                self.setCursor(Qt.SizeHorCursor)
+            else:
+                self.dragging = True
+                self.offset_x = event.x()
+                self.setCursor(Qt.SizeHorCursor)
+                self.setFocus()
+                self.selected = True
+                self.parent().set_selected_clip(self)
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        parent = self.parent()
+        px_per_sec = parent.px_per_sec
+        left_margin = parent.left_margin
+        scroll_offset = parent.scroll_offset
+        timeline_width = parent.width()
+        w = max(30, int(self.duration_sec * px_per_sec))
+        min_x = left_margin
+        max_x = timeline_width - w
+
+        if self.dragging and self.selected:
+            delta_x = event.x() - self.offset_x
+            delta_sec = delta_x / px_per_sec
+            selected_clips = [c for c in parent.clip_list if c.selected]
+            min_start_sec = min([c.start_sec for c in selected_clips])
+            max_left_shift = -(min_start_sec - (parent.scroll_offset if parent.scroll_offset else 0))
+            actual_delta_sec = max(delta_sec, max_left_shift)
+            for c in selected_clips:
+                c.start_sec += actual_delta_sec
+                c.update_geometry(px_per_sec, scroll_offset, left_margin, parent.height())
+            parent.update()
+            return
+
+        if self.resizing_left:
+            delta_px = event.x() - self.resize_start_x
+            delta_sec = delta_px / px_per_sec
+            new_trim_in = self.orig_trim_in + delta_sec
+            new_trim_in = max(0, min(new_trim_in, self.trim_out - 0.5))
+            self.trim_in = new_trim_in
+            self.start_sec = self.orig_start_sec + (self.trim_in - self.orig_trim_in)
+            self.duration_sec = self.trim_out - self.trim_in
+            self.update_geometry(px_per_sec, scroll_offset, left_margin, self.parent().height())
+            self.update()
+        elif self.resizing_right:
+            delta_px = event.x() - self.resize_start_x
+            delta_sec = delta_px / px_per_sec
+            new_trim_out = self.orig_trim_out + delta_sec
+            new_trim_out = min(self.full_duration_sec, max(new_trim_out, self.trim_in + 0.5))
+            self.trim_out = new_trim_out
+            self.duration_sec = self.trim_out - self.trim_in
+            self.update_geometry(px_per_sec, scroll_offset, left_margin, self.parent().height())
+            self.update()
+        elif self.dragging and (event.buttons() & Qt.LeftButton):
+            new_x = self.x() + event.x() - self.offset_x
+            if new_x < left_margin:
+                new_x = left_margin
+            self.move(new_x, self.y())
+            new_start = ((new_x - left_margin) / px_per_sec) + scroll_offset
+            if new_start < 0:
+                new_start = 0
+            self.start_sec = new_start
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+            self.resizing_left = False
+            self.resizing_right = False
+            self.setCursor(Qt.ArrowCursor)
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setBrush(QColor("#ffee55") if self.resizing_left else QColor("#1a90ff"))
+        painter.setPen(QColor("#ffee55") if self.resizing_left else QColor("#0b4c90"))
+        painter.drawRect(0, 0, self.HANDLE_WIDTH, self.height())
+        painter.setBrush(QColor("#ffee55") if self.resizing_right else QColor("#1a90ff"))
+        painter.setPen(QColor("#ffee55") if self.resizing_right else QColor("#0b4c90"))
+        painter.drawRect(self.width()-self.HANDLE_WIDTH, 0, self.HANDLE_WIDTH, self.height())
+        if self.selected:
+            painter.setPen(QColor("#ffee55"))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(2, 2, self.width()-4, self.height()-4)
+        painter.end()
+
+class TimelineTrack(QWidget):
+    TRACK_SPACING = 16
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(60)
+        self.setMaximumHeight(120)
+        self.setStyleSheet("background: #232326; border: 1px solid #333; border-radius: 8px;")
+        self.clip_list = []
+        self.px_per_sec = 42
+        self.left_margin = 20
+        self.scroll_offset = 0
+        self.selected_clip = None
+        self._auto_scroll_direction = None
+        self._auto_scroll_timer = QTimer(self)
+        self._auto_scroll_timer.timeout.connect(self._do_auto_scroll)
+
+    def add_clip(self, clip):
+        if hasattr(clip, 'start_sec') and getattr(clip, 'place_at_start_sec', False):
+            pass
+        else:
+            if self.clip_list:
+                last_clip = self.clip_list[-1]
+                clip.start_sec = last_clip.start_sec + last_clip.duration_sec
+            else:
+                clip.start_sec = 0
+        self.clip_list.append(clip)
+        clip.setParent(self)
+        clip.show()
+        self.update_clips_geometry()
+
+    def remove_clip(self, clip):
+        if clip in self.clip_list:
+            self.clip_list.remove(clip)
+            clip.hide()
+            clip.setParent(None)
+            if self.selected_clip == clip:
+                self.selected_clip = None
+            self.update_clips_geometry()
+
+    def update_clips_geometry(self):
+        self.px_per_sec = self.parent().ruler.zoom_px_per_sec if self.parent().ruler.zoom_px_per_sec else 42
+        self.scroll_offset = self.parent().ruler.scroll_offset_sec
+        self.left_margin = int(self.px_per_sec * 0.10)
+        for clip in self.clip_list:
+            clip.update_geometry(self.px_per_sec, self.scroll_offset, self.left_margin, self.height())
+        self.update()
+
+    def set_selected_clip(self, clip):
+        for c in self.clip_list:
+            c.selected = (c is clip)
+            c.update()
+        self.selected_clip = clip
+
+    def set_selected_clips_range(self, start_x, end_x):
+        px_per_sec = self.px_per_sec
+        left_margin = self.left_margin
+        scroll_offset = self.scroll_offset
+        timeline_height = self.height()
+        select_rect = QRect(min(start_x, end_x), 0, abs(end_x - start_x), timeline_height)
+        for c in self.clip_list:
+            c_geom = c.geometry()
+            if select_rect.intersects(c_geom):
+                c.selected = True
+            else:
+                c.selected = False
+            c.update()
+        self.selected_clip = None
+
+    def auto_scroll(self, direction):
+        self._auto_scroll_direction = direction
+        if not self._auto_scroll_timer.isActive():
+            self._auto_scroll_timer.start(20)
+
+    def _do_auto_scroll(self):
+        direction = self._auto_scroll_direction
+        ruler = self.parent().ruler
+        if direction == 'right':
+            ruler.scroll_offset_sec += 0.5
+            ruler.ensure_duration_for_view(int(ruler.scroll_offset_sec) + 30)
+            ruler.update()
+            self.update_clips_geometry()
+        elif direction == 'left':
+            ruler.scroll_offset_sec -= 0.5
+            if ruler.scroll_offset_sec < 0:
+                ruler.scroll_offset_sec = 0
+            ruler.update()
+            self.update_clips_geometry()
+
+    def stop_auto_scroll(self):
+        self._auto_scroll_timer.stop()
+        self._auto_scroll_direction = None
+
+    def resizeEvent(self, event):
+        self.update_clips_geometry()
+        super().resizeEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Delete:
+            to_remove = [c for c in self.clip_list if c.selected]
+            for c in to_remove:
+                self.remove_clip(c)
+            self.selected_clip = None
+            self.update_clips_geometry()
+        else:
+            super().keyPressEvent(event)
+
+class TimelineScrollArea(QScrollArea):
+    def __init__(self, timeline_widget, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.timeline_widget = timeline_widget
+        self.setWidget(self.timeline_widget)
+        self.verticalScrollBar().setSingleStep(24)
+
+    def wheelEvent(self, event):
+        if event.angleDelta().y() != 0:
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+# --------- TIMELINE WIDGET MODIFICATIONS FOR CTI SELECTION/DRAG ---------
+class TimelineWidget(QWidget):
+    TRACK_SPACING = 16
+
+    def __init__(self, ruler_widget, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background: #18191b; border: none;")
+        self.setMinimumHeight(220)
+        self.ruler = ruler_widget
+        self.cti_pos = 0
+        self.cti_dragging = False
+        self.cti_selected = False  # <-- Add: for CTI selection state
+
+        self.slider_horizontal = QSlider(Qt.Horizontal, self)
+        self.slider_horizontal.setFixedHeight(13)
+        self.slider_horizontal.setStyleSheet("""
+            QSlider { background: transparent; }
+            QSlider::groove:horizontal { border-radius: 6px; background: #eee; height: 7px; }
+            QSlider::handle:horizontal { background: #fff; border: 1px solid #ccc; width: 40px; height: 13px; border-radius: 6px; margin: -3px 0; }
+            QSlider::sub-page:horizontal, QSlider::add-page:horizontal { background: #eee; border-radius: 6px; }
+        """)
+        self.slider_horizontal.setRange(0, 1000)
+        self.slider_horizontal.setSingleStep(1)
+        self.slider_horizontal.setPageStep(10)
+        self.slider_horizontal.setValue(0)
+
+        self.label_horizontal = QLabel("خط دو")
+        self.label_horizontal.setStyleSheet("color:#bbb; font-size:10px;")
+        self.label_horizontal.setFixedWidth(36)
+
+        h_slider_layout = QHBoxLayout()
+        h_slider_layout.setContentsMargins(0, 0, 0, 0)
+        h_slider_layout.setSpacing(4)
+        h_slider_layout.addWidget(self.label_horizontal, alignment=Qt.AlignVCenter)
+        h_slider_layout.addWidget(self.slider_horizontal, stretch=1)
+
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(2)
+
+        self.tracks_layout = QVBoxLayout()
+        self.tracks_layout.setContentsMargins(0, 0, 0, 0)
+        self.tracks_layout.setSpacing(self.TRACK_SPACING)
+        self.tracks = []
+        self.add_track()
+
+        vbox = QVBoxLayout()
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(2)
+        vbox.addStretch(1)
+        vbox.addLayout(h_slider_layout)
+        vbox.addLayout(self.tracks_layout, stretch=1)
+
+        main_layout.addLayout(vbox, stretch=1)
+
+        self.slider_horizontal.valueChanged.connect(self.on_slider_horizontal_changed)
+        self.setAcceptDrops(True)
+        self.timeline_video = None
+        self.parent_window = None
+
+        self._audio_media_player = None
+        self._audio_playing = False
+        self._playback_timer = None
+        self._play_clip = None
+        self._cap = None
+        self._fps = 25
+        self._first_video_shape = None
+
+        self.tools_panel = None
+        self.cut_mode_active = False
+
+        self.select_drag_active = False
+        self.select_drag_start = QPoint()
+        self.select_drag_end = QPoint()
+
+    def add_track(self, insert_index=None):
+        track = TimelineTrack(self)
+        if insert_index is None:
+            self.tracks.append(track)
+            self.tracks_layout.addWidget(track)
+        else:
+            self.tracks.insert(insert_index, track)
+            self.tracks_layout.insertWidget(insert_index, track)
+        self.update_minimum_height()
+        return track
+
+    def remove_track(self, track):
+        if track in self.tracks:
+            self.tracks.remove(track)
+            self.tracks_layout.removeWidget(track)
+            track.deleteLater()
+            self.update_minimum_height()
+
+    def update_minimum_height(self):
+        total_tracks = len(self.tracks)
+        if total_tracks > 0:
+            track_height = self.tracks[0].minimumHeight()
+            total_height = total_tracks * track_height + (total_tracks - 1) * self.TRACK_SPACING + 48
+            self.setMinimumHeight(total_height)
+        else:
+            self.setMinimumHeight(220)
+
+    def visible_seconds(self):
+        if self.ruler.zoom_px_per_sec:
+            return self.width() / self.ruler.zoom_px_per_sec
+        return 10
+
+    def on_slider_horizontal_changed(self, value):
+        max_scroll = max(0, self.ruler.dynamic_duration_sec - self.visible_seconds())
+        new_offset = (value / 1000.0) * max_scroll
+        self.ruler.scroll_offset_sec = new_offset
+        self.ruler.update()
+        for track in self.tracks:
+            track.update_clips_geometry()
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        self.draw_cti()
+        if (
+            self.tools_panel
+            and not self.tools_panel.cut_mode
+            and self.select_drag_active
+        ):
+            p = QPainter(self)
+            p.setPen(QColor(0, 180, 255, 180))
+            p.setBrush(QColor(0, 180, 255, 80))
+            rect = QRect(self.select_drag_start, self.select_drag_end)
+            p.drawRect(rect.normalized())
+            p.end()
+
+    def draw_cti(self):
+        if not hasattr(self, "ruler") or self.ruler is None or self.ruler.zoom_px_per_sec is None:
+            return
+        w = self.width()
+        h = self.height()
+        px_per_sec = self.ruler.zoom_px_per_sec
+        scroll_offset_sec = self.ruler.scroll_offset_sec
+        left_margin = int(px_per_sec * 0.10)
+        cti_x = int((self.cti_pos - scroll_offset_sec) * px_per_sec) + left_margin
+        if cti_x < 0 or cti_x > w:
+            return
+        painter = QPainter(self)
+        painter.setPen(QColor("#aaa"))
+        font_label = QFont("Arial", 8)
+        painter.setFont(font_label)
+        label_text = "خط پلی"
+        text_rect = painter.boundingRect(0, 0, 40, 12, Qt.AlignCenter, label_text)
+        label_x = cti_x - text_rect.width()//2
+        label_y = max(0, 0 - text_rect.height() - 2)
+        # CTI handle: highlight if selected
+        if self.cti_selected:
+            painter.setPen(QColor("#ffee55"))
+            painter.setBrush(QColor("#ffee55"))
+        else:
+            painter.setPen(QColor("#d0d0d0"))
+            painter.setBrush(QColor("#232326"))
+        painter.drawLine(cti_x, 0, cti_x, h)
+        circle_r = 14 if self.cti_selected else 10
+        painter.setBrush(QColor("#232326") if not self.cti_selected else QColor("#ffee55"))
+        painter.setPen(QColor("#f6f6f6") if not self.cti_selected else QColor("#ffee55"))
+        painter.drawEllipse(cti_x - circle_r//2, 0, circle_r, circle_r)
+        painter.setPen(QColor("#111") if not self.cti_selected else QColor("#0b4c90"))
+        font = QFont("Arial", 9, QFont.Bold)
+        painter.setFont(font)
+        text = str(int(self.cti_pos))
+        painter.drawText(cti_x - circle_r//2, 0, circle_r, circle_r, Qt.AlignCenter, text)
+        painter.setPen(QColor("#aaa"))
+        painter.setFont(font_label)
+        painter.drawText(label_x, label_y + text_rect.height(), label_text)
+        painter.end()
+
+    def _cti_handle_rect(self):
+        if not hasattr(self, "ruler") or self.ruler is None or self.ruler.zoom_px_per_sec is None:
+            return QRect()
+        px_per_sec = self.ruler.zoom_px_per_sec
+        scroll_offset_sec = self.ruler.scroll_offset_sec
+        left_margin = int(px_per_sec * 0.10)
+        cti_x = int((self.cti_pos - scroll_offset_sec) * px_per_sec) + left_margin
+        circle_r = 16
+        return QRect(cti_x - circle_r//2, 0, circle_r, circle_r)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        elif event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        pos = event.pos()
+        file_path = ""
+        if event.mimeData().hasText():
+            file_path = event.mimeData().text()
+        elif event.mimeData().hasUrls():
+            url = event.mimeData().urls()[0]
+            file_path = url.toLocalFile()
+        ext = file_path.split('.')[-1].lower()
+        if ext in VIDEO_FORMATS:
+            duration_sec = get_video_duration_seconds(file_path)
+        else:
+            duration_sec = 5
+        if ext in IMAGE_FORMATS:
+            pixmap = QPixmap(file_path)
+            if pixmap.isNull():
+                pixmap = QPixmap(40, 40)
+                pixmap.fill(QColor("#444"))
+        else:
+            pixmap = QPixmap(f"{ICON_PATH}/video-file.png")
+
+        if ext in VIDEO_FORMATS and self._first_video_shape is None:
+            cap = cv2.VideoCapture(file_path)
+            if cap.isOpened():
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if width > 0 and height > 0:
+                    self._first_video_shape = (width, height)
+            cap.release()
+
+        track_y = 0
+        found_track = None
+        for idx, track in enumerate(self.tracks):
+            track_geom = track.geometry()
+            global_tl_pos = track.mapTo(self, QPoint(0, 0))
+            y_top = global_tl_pos.y()
+            y_bottom = y_top + track.height()
+            if y_top <= pos.y() < y_bottom:
+                found_track = track
+                track_y = y_top
+                break
+        if found_track is not None:
+            px_per_sec = self.ruler.zoom_px_per_sec if self.ruler.zoom_px_per_sec else 42
+            left_margin = int(px_per_sec * 0.10)
+            scroll_offset = self.ruler.scroll_offset_sec
+            x_pos = pos.x()
+            start_sec = (x_pos - left_margin) / px_per_sec + scroll_offset
+            if start_sec < 0:
+                start_sec = 0
+            clip = TimelineClip(file_path, pixmap, duration_sec, found_track)
+            clip.start_sec = start_sec
+            clip.place_at_start_sec = True
+            found_track.add_clip(clip)
+            found_track.set_selected_clip(clip)
+            found_track.update_clips_geometry()
+        else:
+            track = self.add_track(insert_index=len(self.tracks))
+            px_per_sec = self.ruler.zoom_px_per_sec if self.ruler.zoom_px_per_sec else 42
+            left_margin = int(px_per_sec * 0.10)
+            scroll_offset = self.ruler.scroll_offset_sec
+            x_pos = pos.x()
+            start_sec = (x_pos - left_margin) / px_per_sec + scroll_offset
+            if start_sec < 0:
+                start_sec = 0
+            clip = TimelineClip(file_path, pixmap, duration_sec, track)
+            clip.start_sec = start_sec
+            clip.place_at_start_sec = True
+            track.add_clip(clip)
+            track.set_selected_clip(clip)
+            track.update_clips_geometry()
+        if file_path.lower().endswith(tuple(VIDEO_FORMATS)):
+            self.timeline_video = file_path
+        event.acceptProposedAction()
+        self.update_minimum_height()
+
+    def sync_preview_to_cti(self):
+        mw = self.parent_window if self.parent_window else self.window()
+        cti_time = self.cti_pos
+        found_clip = None
+        rel_sec = 0
+        for track in self.tracks:
+            for clip in track.clip_list:
+                if clip.file_path.lower().endswith(tuple(VIDEO_FORMATS)):
+                    clip_start = clip.start_sec
+                    clip_end = clip.start_sec + clip.duration_sec
+                    if clip_start <= cti_time < clip_end:
+                        found_clip = clip
+                        rel_sec = clip.trim_in + (cti_time - clip.start_sec)
+                        break
+            if found_clip:
+                break
+
+        if found_clip:
+            cap = cv2.VideoCapture(found_clip.file_path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25
+            frame_idx = int(rel_sec * fps)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            cap.release()
+            if ret:
+                if self._first_video_shape and frame is not None:
+                    frame = cv2.resize(frame, self._first_video_shape, interpolation=cv2.INTER_AREA)
+                mw.preview_player_widget.show_cv_frame(frame)
+            else:
+                mw.preview_player_widget.show_black()
+            self.stop_audio()
+        else:
+            mw.preview_player_widget.show_black()
+            self.stop_audio()
+
+    # ---- NEW: Handle CTI selection and drag ----
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            self.ruler.mousePressEvent(event)
+        elif event.button() == Qt.LeftButton:
+            x = event.x()
+            y = event.y()
+            px_per_sec = self.ruler.zoom_px_per_sec if self.ruler.zoom_px_per_sec else 42
+            left_margin = int(px_per_sec * 0.10)
+            scroll_offset_sec = self.ruler.scroll_offset_sec
+            cti_x = int((self.cti_pos - scroll_offset_sec) * px_per_sec) + left_margin
+
+            # اولویت: اگر روی دایره CTI هستیم، انتخاب شود و آماده جابجایی
+            cti_rect = self._cti_handle_rect()
+            if cti_rect.contains(event.pos()):
+                self.cti_selected = True
+                self.cti_dragging = True
+                self._drag_offset = x - cti_rect.center().x()
+                self.setCursor(Qt.SizeHorCursor)
+                self.update()
+                return
+
+            # --- Only activate select tool if not over a button ---
+            if self.tools_panel and not self.tools_panel.cut_mode:
+                if not self._under_button(event.pos()):
+                    self.select_drag_active = True
+                    self.select_drag_start = event.pos()
+                    self.select_drag_end = event.pos()
+                    self.setCursor(Qt.CrossCursor)
+                    self.tools_panel.on_select_clicked()
+                    self.update()
+                    return
+            if abs(x - cti_x) <= 12:
+                self.cti_dragging = True
+                self._drag_offset = x - cti_x
+                self.setCursor(Qt.SizeHorCursor)
+            else:
+                self.cti_selected = False
+                if self.tools_panel and self.tools_panel.cut_mode:
+                    px_per_sec = self.ruler.zoom_px_per_sec if self.ruler.zoom_px_per_sec else 42
+                    left_margin = int(px_per_sec * 0.10)
+                    scroll_offset_sec = self.ruler.scroll_offset_sec
+                    new_cti = (x - left_margin) / px_per_sec + scroll_offset_sec
+                    self.cti_pos = new_cti
+                    self.update()
+                    self.ruler.update()
+                    for track in self.tracks:
+                        for clip in track.clip_list:
+                            clip_start = clip.start_sec
+                            clip_end = clip.start_sec + clip.duration_sec
+                            if clip_start < self.cti_pos < clip_end:
+                                rel_cut = self.cti_pos - clip.start_sec
+                                if rel_cut <= 0 or rel_cut >= clip.duration_sec:
+                                    continue
+                                left_clip = TimelineClip(clip.file_path, clip.thumb.pixmap(), rel_cut, track)
+                                left_clip.start_sec = clip.start_sec
+                                left_clip.trim_in = clip.trim_in
+                                left_clip.trim_out = clip.trim_in + rel_cut
+                                right_clip = TimelineClip(clip.file_path, clip.thumb.pixmap(), clip.duration_sec - rel_cut, track)
+                                right_clip.start_sec = clip.start_sec + rel_cut
+                                right_clip.trim_in = clip.trim_in + rel_cut
+                                right_clip.trim_out = clip.trim_out
+                                idx = track.clip_list.index(clip)
+                                track.remove_clip(clip)
+                                track.clip_list.insert(idx, left_clip)
+                                track.clip_list.insert(idx+1, right_clip)
+                                left_clip.setParent(track)
+                                right_clip.setParent(track)
+                                left_clip.show()
+                                right_clip.show()
+                                track.update_clips_geometry()
+                                break
+                    return
+                else:
+                    super().mousePressEvent(event)
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        w = self.width()
+        px_per_sec = self.ruler.zoom_px_per_sec if self.ruler.zoom_px_per_sec else 42
+        scroll_offset_sec = self.ruler.scroll_offset_sec
+        right_margin = int(px_per_sec * 0.10)
+        left_margin = int(px_per_sec * 0.10)
+        if self.cti_dragging and self.cti_selected:
+            x = event.x()
+            new_pos = (x - left_margin - self._drag_offset) / px_per_sec + scroll_offset_sec
+            if new_pos < 0:
+                new_pos = 0
+            cti_x = int((new_pos - self.ruler.scroll_offset_sec) * px_per_sec) + left_margin
+            if cti_x > w - right_margin:
+                self.ruler.scroll_offset_sec = new_pos - (w - right_margin - left_margin) / px_per_sec
+                if self.ruler.scroll_offset_sec < 0:
+                    self.ruler.scroll_offset_sec = 0
+                cti_x = int((new_pos - self.ruler.scroll_offset_sec) * px_per_sec) + left_margin
+            elif cti_x < left_margin:
+                self.ruler.scroll_offset_sec = new_pos
+                if self.ruler.scroll_offset_sec < 0:
+                    self.ruler.scroll_offset_sec = 0
+                if new_pos < self.ruler.scroll_offset_sec:
+                    new_pos = self.ruler.scroll_offset_sec
+                cti_x = int((new_pos - self.ruler.scroll_offset_sec) * px_per_sec) + left_margin
+            self.cti_pos = new_pos
+            self.update()
+            self.ruler.update()
+            self.sync_preview_to_cti()
+            for track in self.tracks:
+                track.update_clips_geometry()
+            return
+
+        if self.select_drag_active and self.tools_panel and not self.tools_panel.cut_mode:
+            self.select_drag_end = event.pos()
+            select_rect = QRect(self.select_drag_start, self.select_drag_end).normalized()
+            for track in self.tracks:
+                track_top_left = track.mapFrom(self, select_rect.topLeft())
+                track_bottom_right = track.mapFrom(self, select_rect.bottomRight())
+                track_sel_rect = QRect(track_top_left, track_bottom_right).normalized()
+                track.set_selected_clips_range(track_sel_rect.left(), track_sel_rect.right())
+            self.update()
+            return
+
+        if event.buttons() & Qt.MiddleButton:
+            self.ruler.mouseMoveEvent(event)
+        elif self.cti_dragging:
+            # legacy drag (for cut mode etc)
+            x = event.x()
+            new_pos = (x - left_margin - self._drag_offset) / px_per_sec + scroll_offset_sec
+            if new_pos < 0:
+                new_pos = 0
+            cti_x = int((new_pos - self.ruler.scroll_offset_sec) * px_per_sec) + left_margin
+            if cti_x > w - right_margin:
+                self.ruler.scroll_offset_sec = new_pos - (w - right_margin - left_margin) / px_per_sec
+                if self.ruler.scroll_offset_sec < 0:
+                    self.ruler.scroll_offset_sec = 0
+                cti_x = int((new_pos - self.ruler.scroll_offset_sec) * px_per_sec) + left_margin
+            elif cti_x < left_margin:
+                self.ruler.scroll_offset_sec = new_pos
+                if self.ruler.scroll_offset_sec < 0:
+                    self.ruler.scroll_offset_sec = 0
+                if new_pos < self.ruler.scroll_offset_sec:
+                    new_pos = self.ruler.scroll_offset_sec
+                cti_x = int((new_pos - self.ruler.scroll_offset_sec) * px_per_sec) + left_margin
+
+            self.cti_pos = new_pos
+            self.update()
+            self.ruler.update()
+            self.sync_preview_to_cti()
+            for track in self.tracks:
+                track.update_clips_geometry()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            self.ruler.mouseReleaseEvent(event)
+        elif self.cti_dragging and event.button() == Qt.LeftButton:
+            self.cti_dragging = False
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+        elif self.select_drag_active and event.button() == Qt.LeftButton and self.tools_panel and not self.tools_panel.cut_mode:
+            self.select_drag_end = event.pos()
+            self.select_drag_active = False
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+            return
+        else:
+            super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key_Delete:
+            for track in self.tracks:
+                track.keyPressEvent(event)
+        elif event.key() == Qt.Key_0 and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier)):
+            self.ruler.scroll_offset_sec = 0
+            self.cti_pos = 0
+            self.cti_selected = False
+            self.update()
+            self.ruler.update()
+            self.sync_preview_to_cti()
+            for track in self.tracks:
+                track.update_clips_geometry()
+        elif event.key() == Qt.Key_Space:
+            if self._playback_timer:
+                self.stop_cv_clip()
+            else:
+                self.play_cv_clip()
+        else:
+            self.ruler.keyPressEvent(event)
+
+    def _under_button(self, pos):
+        child = self.childAt(pos)
+        while child is not None and child != self:
+            if isinstance(child, QPushButton):
+                return True
+            child = child.parentWidget()
+        return False
+
+    # (Rest is unchanged...)
+
+    def play_cv_clip(self):
+        self.stop_cv_clip()
+        self._playback_timer = QTimer(self)
+        self._playback_timer.timeout.connect(self._playback_tick_infinite)
+        self._playback_timer.start(int(1000 / 25))
+
+    def _playback_tick_infinite(self):
+        fps = 25
+        self.cti_pos += 1.0 / fps
+        if self.cti_pos + 10 > self.ruler.dynamic_duration_sec:
+            self.ruler.dynamic_duration_sec += 3600
+            self.ruler.update()
+
+        mw = self.parent_window if self.parent_window else self.window()
+        found_clip = None
+        rel_sec = 0
+        for track in self.tracks:
+            for clip in track.clip_list:
+                if clip.file_path.lower().endswith(tuple(VIDEO_FORMATS)):
+                    clip_start = clip.start_sec
+                    clip_end = clip.start_sec + clip.duration_sec
+                    if clip_start <= self.cti_pos < clip_end:
+                        found_clip = clip
+                        rel_sec = clip.trim_in + (self.cti_pos - clip.start_sec)
+                        break
+            if found_clip:
+                break
+
+        if found_clip:
+            if not hasattr(self, "_cap") or self._cap is None or self._cap_file != found_clip.file_path:
+                if hasattr(self, "_cap") and self._cap:
+                    self._cap.release()
+                self._cap = cv2.VideoCapture(found_clip.file_path)
+                self._cap_file = found_clip.file_path
+                self._fps = self._cap.get(cv2.CAP_PROP_FPS) or 25
+            frame_idx = int(rel_sec * self._fps)
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = self._cap.read()
+            if ret:
+                if self._first_video_shape and frame is not None:
+                    frame = cv2.resize(frame, self._first_video_shape, interpolation=cv2.INTER_AREA)
+                mw.preview_player_widget.show_cv_frame(frame)
+            else:
+                mw.preview_player_widget.show_black()
+            self.start_audio(found_clip.file_path, rel_sec)
+        else:
+            mw.preview_player_widget.show_black()
+            self.stop_audio()
+        self.ruler.update()
+        for track in self.tracks:
+            track.update_clips_geometry()
+        self.update()
+
+    def stop_cv_clip(self):
+        if self._playback_timer:
+            self._playback_timer.stop()
+            self._playback_timer = None
+        if hasattr(self, "_cap") and self._cap:
+            self._cap.release()
+            self._cap = None
+        self._play_clip = None
+        self.stop_audio()
+
+    def start_audio(self, file_path, start_sec):
+        if hasattr(self, "_audio_media_player") and self._audio_media_player:
+            if getattr(self, "_audio_file", None) == file_path:
+                if abs(self._audio_media_player.position() / 1000.0 - start_sec) < 0.1:
+                    return
+            self._audio_media_player.stop()
+        self._audio_media_player = QMediaPlayer()
+        self._audio_media_player.setMedia(QMediaContent(QUrl.fromLocalFile(file_path)))
+        self._audio_media_player.setVolume(90)
+        self._audio_media_player.setPosition(int(start_sec * 1000))
+        self._audio_media_player.play()
+        self._audio_file = file_path
+        self._audio_playing = True
+
+    def stop_audio(self):
+        if hasattr(self, "_audio_media_player") and self._audio_media_player:
+            self._audio_media_player.stop()
+            self._audio_media_player = None
+        self._audio_playing = False
+
+    def wheelEvent(self, event: QWheelEvent):
+        if event.modifiers() & Qt.ControlModifier:
+            angle = event.angleDelta().y()
+            cursor_x = event.position().x()
+            width = self.width()
+            old_zoom = self.ruler.zoom_px_per_sec if self.ruler.zoom_px_per_sec else 42
+
+            if angle > 0:
+                self.ruler.zoom_px_per_sec = min(self.ruler.max_zoom, int(self.ruler.zoom_px_per_sec * 1.1))
+            else:
+                self.ruler.zoom_px_per_sec = max(self.ruler.min_zoom, int(self.ruler.zoom_px_per_sec / 1.1))
+
+            if width > 0:
+                sec_under_cursor = self.ruler.scroll_offset_sec + (cursor_x - int(self.ruler.zoom_px_per_sec * 0.10)) / old_zoom
+                self.ruler.scroll_offset_sec = max(0, sec_under_cursor - (cursor_x - int(self.ruler.zoom_px_per_sec * 0.10)) / self.ruler.zoom_px_per_sec)
+                view_seconds = int(width / self.ruler.zoom_px_per_sec)
+                self.ruler.ensure_duration_for_view(int(self.ruler.scroll_offset_sec) + view_seconds + 3600)
+            self.ruler.update()
+            for track in self.tracks:
+                track.update_clips_geometry()
+        else:
+            event.ignore()
+
+# --------- END TIMELINE WIDGET ---------
+
+# (Everything else: PreviewPlayerWidget, MediaPanel, TimelineToolsPanel, MainWindow, VideoTimelineControl is unchanged, just keep them as in your code above.)
+
+# ---- [The rest of your code is unchanged, so not repeating for brevity, but should be present in your file as above] ----
+
+class PreviewPlayerWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.black_widget = QWidget()
+        self.black_widget.setStyleSheet("background-color: #111;")
+        self.video_widget = QVideoWidget()
+        self.cv_frame_widget = QLabel()
+        self.cv_frame_widget.setStyleSheet("background: #000;")
+        self.cv_frame_widget.setAlignment(Qt.AlignCenter)
+        self.stack = QStackedLayout(self)
+        self.stack.addWidget(self.black_widget)
+        self.stack.addWidget(self.video_widget)
+        self.stack.addWidget(self.cv_frame_widget)
+        self.setLayout(self.stack)
+        self.show_black()
+        self.cv_frame_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+
+    def show_black(self):
+        self.stack.setCurrentWidget(self.black_widget)
+
+    def show_video(self):
+        self.stack.setCurrentWidget(self.video_widget)
+
+    def show_cv_frame(self, frame: np.ndarray):
+        if frame is None or frame.size == 0:
+            self.show_black()
+            return
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_frame.shape
+        bytes_per_line = ch * w
+        image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(image)
+        self.cv_frame_widget.setPixmap(pixmap.scaled(self.cv_frame_widget.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.stack.setCurrentWidget(self.cv_frame_widget)
+
+    def resizeEvent(self, event):
+        if self.stack.currentWidget() == self.cv_frame_widget and self.cv_frame_widget.pixmap():
+            pixmap = self.cv_frame_widget.pixmap()
+            if pixmap:
+                self.cv_frame_widget.setPixmap(pixmap.scaled(self.cv_frame_widget.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        super().resizeEvent(event)
+
+class MediaPanel(QWidget):
+    def __init__(self, icon_path, parent=None):
+        super().__init__(parent)
+        self.icon_path = icon_path
+        self.setAcceptDrops(True)
+
+        self.search_field = QLineEdit()
+        self.search_field.setPlaceholderText("جستجو در فایل‌ها ...")
+        self.search_field.setClearButtonEnabled(True)
+        self.search_field.setFixedHeight(28)
+        self.search_field.setStyleSheet("""
+            QLineEdit {
+                border-radius: 5px;
+                border: 1px solid #444;
+                background: #222;
+                color: #eee;
+                padding: 0 8px;
+            }
+        """)
+
+        self.video_btn = QPushButton("ویدیو")
+        self.video_btn.setFixedHeight(28)
+        self.video_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a8dde; color: #fff; font-weight: bold; border-radius: 5px; border: none;
+            }
+            QPushButton:hover { background-color: #2672bc; }
+        """)
+
+        self.top_bar = QHBoxLayout()
+        self.top_bar.setContentsMargins(4, 8, 4, 6)
+        self.top_bar.setSpacing(8)
+        self.top_bar.addWidget(self.search_field)
+        self.top_bar.addWidget(self.video_btn)
+
+        self.scroll_area = MediaIconsScrollArea()
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(4)
+        main_layout.addLayout(self.top_bar)
+        main_layout.addWidget(self.scroll_area, stretch=1)
+
+        self.search_field.textChanged.connect(self.handle_search)
+        self.video_btn.clicked.connect(self.open_file_dialog)
+
+    def open_file_dialog(self):
+        file_filter = get_video_filter()
+        files, _ = QFileDialog.getOpenFileNames(self, "انتخاب فایل‌های ویدئویی و تصویری", "", file_filter)
+        for file_path in files:
+            ext = file_path.split('.')[-1].lower()
+            if ext in IMAGE_FORMATS:
+                pixmap = QPixmap(file_path)
+                if pixmap.isNull():
+                    pixmap = QPixmap(48, 64)
+                    pixmap.fill(QColor("#444"))
+            else:
+                pixmap = QPixmap(f"{self.icon_path}/video-file.png")
+            icon = DraggableMediaIcon(file_path, pixmap)
+            self.scroll_area.add_media_icon(icon)
+
+    def handle_search(self, text):
+        self.scroll_area.filter_icons(text)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        file_paths = []
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                file_paths.append(url.toLocalFile())
+        elif event.mimeData().hasText():
+            file_paths = [event.mimeData().text()]
+        for file_path in file_paths:
+            ext = file_path.split('.')[-1].lower()
+            if ext in VIDEO_FORMATS + IMAGE_FORMATS:
+                if ext in IMAGE_FORMATS:
+                    pixmap = QPixmap(file_path)
+                    if pixmap.isNull():
+                        pixmap = QPixmap(48, 64)
+                        pixmap.fill(QColor("#444"))
+                else:
+                    pixmap = QPixmap(f"{self.icon_path}/video-file.png")
+                icon = DraggableMediaIcon(file_path, pixmap)
+                self.scroll_area.add_media_icon(icon)
+        event.acceptProposedAction()
+
+class TimelineToolsPanel(QWidget):
+    def __init__(self, timeline_widget, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(64)
+        self.timeline_widget = timeline_widget
+        self.setStyleSheet("""
+            QWidget#TimelineToolsPanel {
+                background: #18191b;
+                border-right: 2px solid #222;
+                border-radius: 8px;
+            }
+            QPushButton {
+                background: #2e4053;
+                color: #eee;
+                border: none;
+                border-radius: 5px;
+                font-size: 13px;
+                min-width: 44px;
+                min-height: 32px;
+                margin: 6px 5px 6px 5px;
+            }
+            QPushButton:selected, QPushButton:checked {
+                background: #f6ae2d;
+                color: #111;
+            }
+            QPushButton:hover {
+                background: #376082;
+            }
+            QLabel {
+                color: #aaa;
+                font-weight: bold;
+                margin-top: 8px;
+                margin-bottom: 0px;
+                font-size: 13px;
+            }
+        """)
+        self.setObjectName("TimelineToolsPanel")
+        self.cut_mode = False
+
+        self.cut_btn = QPushButton("برش")
+        self.cut_btn.setCheckable(True)
+        self.select_btn = QPushButton("انتخاب")
+        self.select_btn.setCheckable(True)
+        self.select_btn.setChecked(True)
+
+        self.btn_group = [self.cut_btn, self.select_btn]
+
+        btn_layout = QVBoxLayout()
+        btn_layout.setContentsMargins(2, 12, 2, 0)
+        btn_layout.setSpacing(6)
+        btn_layout.addWidget(self.cut_btn)
+        btn_layout.addWidget(self.select_btn)
+        btn_layout.addStretch(1)
+
+        label = QLabel("ابزار")
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        label_layout = QHBoxLayout()
+        label_layout.setContentsMargins(0, 0, 4, 2)
+        label_layout.addStretch(1)
+        label_layout.addWidget(label)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addLayout(btn_layout)
+        main_layout.addLayout(label_layout)
+
+        self.cut_btn.clicked.connect(self.on_cut_clicked)
+        self.select_btn.clicked.connect(self.on_select_clicked)
+
+        self.on_select_clicked()
+
+    def on_cut_clicked(self):
+        self.cut_btn.setChecked(True)
+        self.select_btn.setChecked(False)
+        self.cut_mode = True
+        self.timeline_widget.cut_mode_active = True
+        self.timeline_widget.tools_panel = self
+        self.timeline_widget.setCursor(Qt.CrossCursor)
+
+    def on_select_clicked(self):
+        self.cut_btn.setChecked(False)
+        self.select_btn.setChecked(True)
+        self.cut_mode = False
+        self.timeline_widget.cut_mode_active = False
+        self.timeline_widget.tools_panel = self
+        self.timeline_widget.setCursor(Qt.ArrowCursor)
+
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Video Editor Mockup")
+        self.setStyleSheet("background-color: #222;")
+        self.resize(1280, 720)
+        self._splitter_state_normal = None
+        self._splitter_mode = False
+        self._fullscreen_mode = False
+        self._saved_geometry = None
+        self._saved_window_state = None
+
+        self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
+        self.preview_player_widget = PreviewPlayerWidget()
+        self.media_player.setVideoOutput(self.preview_player_widget.video_widget)
+        self.timeline_control = VideoTimelineControl(self.media_player, self.preview_player_widget)
+
+        self.media_panel = MediaPanel(ICON_PATH)
+        self.media_library = LabeledFrame("مدیا", main_widget=self.media_panel)
+
+        video_and_timeline = QWidget()
+        video_and_timeline_layout = QVBoxLayout(video_and_timeline)
+        video_and_timeline_layout.setSpacing(0)
+        video_and_timeline_layout.setContentsMargins(0, 0, 0, 0)
+        video_and_timeline_layout.addWidget(self.preview_player_widget, stretch=1)
+        video_and_timeline_layout.addWidget(self.timeline_control, stretch=0)
+        self.preview_player = LabeledFrame("نمایش", main_widget=video_and_timeline)
+        self.project_details = LabeledFrame("افکت")
+
+        self.ruler_widget = TimeRuler(initial_view_seconds=10, ruler_name="خط تایم‌لاین")
+        self.timeline_widget = TimelineWidget(self.ruler_widget)
+
+        self.tools_panel = TimelineToolsPanel(self.timeline_widget)
+
+        self.timeline_scroll_area = TimelineScrollArea(self.timeline_widget)
+        self.timeline_editor = LabeledFrame("تایم لاین", main_widget=self.timeline_scroll_area)
+        self.timeline_editor.insert_widget_above_title(self.ruler_widget)
+
+        self.side_panel = LabeledFrame("تراک ها")
+        self.side_panel.setMinimumWidth(120)
+        self.side_panel.setMaximumWidth(180)
+
+        self.timeline_row = QWidget()
+        timeline_row_layout = QHBoxLayout(self.timeline_row)
+        timeline_row_layout.setContentsMargins(0, 0, 0, 0)
+        timeline_row_layout.setSpacing(0)
+        timeline_row_layout.addWidget(self.side_panel)
+        timeline_row_layout.addWidget(self.tools_panel)
+        timeline_row_layout.addWidget(self.timeline_editor, stretch=1)
+
+        self.top_splitter = QSplitter(Qt.Horizontal)
+        self.top_splitter.addWidget(self.media_library)
+        self.top_splitter.addWidget(self.preview_player)
+        self.top_splitter.addWidget(self.project_details)
+        self.top_splitter.setSizes([250, 700, 300])
+
+        self.main_splitter = QSplitter(Qt.Vertical)
+        self.main_splitter.addWidget(self.top_splitter)
+        self.main_splitter.addWidget(self.timeline_row)
+        self.main_splitter.setSizes([500, 220])
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.addWidget(self.main_splitter)
+
+        self._splitter_state_normal = (
+            self.top_splitter.sizes(),
+            self.main_splitter.sizes()
+        )
+
+        self.grabKeyboard()
+        self.timeline_widget.parent_window = self
+        self.timeline_widget.tools_panel = self.tools_panel
+
+    def keyPressEvent(self, event):
+        self.timeline_widget.keyPressEvent(event)
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and (event.modifiers() & Qt.ControlModifier):
+            self.toggle_fullscreen_video()
+        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.toggle_preview_max()
+        elif event.key() == Qt.Key_Space:
+            pass
+        else:
+            super().keyPressEvent(event)
+
+    def toggle_fullscreen_video(self):
+        if not self._fullscreen_mode:
+            self._saved_geometry = self.geometry()
+            self._saved_window_state = self.windowState()
+            self.main_splitter.hide()
+            self.preview_player.hide()
+            self.media_library.hide()
+            self.project_details.hide()
+            self.timeline_editor.hide()
+            self.preview_player_widget.setParent(None)
+            self.preview_player_widget.setWindowFlags(Qt.Window)
+            self.preview_player_widget.showFullScreen()
+            self._fullscreen_mode = True
+        else:
+            self.preview_player_widget.setWindowFlags(Qt.Widget)
+            self.preview_player_widget.showNormal()
+            layout = self.preview_player.layout()
+            if layout is not None:
+                layout.insertWidget(0, self.preview_player_widget)
+            else:
+                self.preview_player.layout().addWidget(self.preview_player_widget)
+            self.main_splitter.show()
+            self.preview_player.show()
+            self.media_library.show()
+            self.project_details.show()
+            self.timeline_editor.show()
+            if self._saved_geometry:
+                self.setGeometry(self._saved_geometry)
+            if self._saved_window_state:
+                self.setWindowState(self._saved_window_state)
+            self._fullscreen_mode = False
+
+    def toggle_preview_max(self):
+        if self._fullscreen_mode:
+            return
+        if not self._splitter_mode:
+            self._splitter_state_normal = (
+                self.top_splitter.sizes(),
+                self.main_splitter.sizes()
+            )
+            total = sum(self.top_splitter.sizes())
+            self.top_splitter.setSizes([0, total, 0])
+            main_total = sum(self.main_splitter.sizes())
+            self.main_splitter.setSizes([main_total, 0])
+            self._splitter_mode = True
+        else:
+            if self._splitter_state_normal:
+                sizes_top, sizes_main = self._splitter_state_normal
+                self.top_splitter.setSizes(sizes_top)
+                self.main_splitter.setSizes(sizes_main)
+            self._splitter_mode = False
+
+class VideoTimelineControl(QWidget):
+    def __init__(self, media_player, preview_player_widget, parent=None):
+        super().__init__(parent)
+        self.media_player = media_player
+        self.preview_player_widget = preview_player_widget
+        self.repeat = False
+        self.muted = False
+
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, 0)
+        self.slider.setStyleSheet("""
+            QSlider::groove:horizontal { background: #444; height: 6px; border-radius: 3px; }
+            QSlider::handle:horizontal { background: #ddd; width: 14px; border-radius: 7px; margin: -4px 0; }
+            QSlider::sub-page:horizontal { background: #0078d7; border-radius: 3px;}
+        """)
+        btn_size = QSize(23, 23)
+
+        self.play_pause_btn = QPushButton()
+        self.play_icon = QIcon(f"{ICON_PATH}/playFX.png")
+        self.pause_icon = QIcon(f"{ICON_PATH}/pause-button.png")
+        self.play_pause_btn.setIcon(self.play_icon)
+        self.play_pause_btn.setIconSize(btn_size)
+        self.play_pause_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                outline: none;
+                margin: 0;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: transparent;
+            }
+        """)
+        self.play_pause_btn.setFixedSize(btn_size)
+
+        self.stop_btn = QPushButton()
+        self.stop_btn.setIcon(QIcon(f"{ICON_PATH}/stop-button.png"))
+        self.stop_btn.setIconSize(btn_size)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                outline: none;
+                margin: 0;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: transparent;
+            }
+        """)
+        self.stop_btn.setFixedSize(btn_size)
+
+        self.repeat_btn = QPushButton()
+        self.repeat_off_icon = QIcon(f"{ICON_PATH}/record.png")
+        self.repeat_on_icon = QIcon(f"{ICON_PATH}/repeat-on.png") if QIcon(f"{ICON_PATH}/repeat-on.png").availableSizes() else self.repeat_off_icon
+        self.repeat_btn.setIcon(self.repeat_off_icon)
+        self.repeat_btn.setIconSize(btn_size)
+        self.repeat_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                outline: none;
+                margin: 0;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: transparent;
+            }
+        """)
+        self.repeat_btn.setFixedSize(btn_size)
+
+        self.audio_btn = QPushButton()
+        self.audio_on_icon = QIcon(f"{ICON_PATH}/audio.png")
+        self.audio_off_icon = QIcon(f"{ICON_PATH}/volume.png")
+        self.audio_btn.setIcon(self.audio_off_icon)
+        self.audio_btn.setIconSize(btn_size)
+        self.audio_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                outline: none;
+                margin: 0;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: transparent;
+            }
+        """)
+        self.audio_btn.setFixedSize(btn_size)
+
+        controls_layout = QHBoxLayout()
+        controls_layout.setSpacing(12)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.addSpacerItem(QSpacerItem(20, 0, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        controls_layout.addWidget(self.stop_btn)
+        controls_layout.addWidget(self.play_pause_btn)
+        controls_layout.addWidget(self.repeat_btn)
+        controls_layout.addWidget(self.audio_btn)
+        controls_layout.addSpacerItem(QSpacerItem(20, 0, QSizePolicy.Expanding, QSizePolicy.Minimum))
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(2)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(self.slider)
+        self._controls_layout = controls_layout
+        self._main_layout = main_layout
+        self._top_spacer = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        main_layout.addItem(self._top_spacer)
+        main_layout.addLayout(controls_layout)
+
+        self.play_pause_btn.clicked.connect(self.toggle_play_pause)
+        self.stop_btn.clicked.connect(self.stop)
+        self.repeat_btn.clicked.connect(self.toggle_repeat)
+        self.audio_btn.clicked.connect(self.toggle_mute)
+        self.slider.sliderMoved.connect(self.seek)
+        self.slider.sliderPressed.connect(self.on_slider_pressed)
+        self.slider.sliderReleased.connect(self.on_slider_released)
+
+        self.media_player.positionChanged.connect(self.update_slider)
+        self.media_player.durationChanged.connect(self.set_slider_range)
+        self.media_player.mediaStatusChanged.connect(self.on_media_status_changed)
+        self.media_player.stateChanged.connect(self.on_state_changed)
+
+        self._was_playing = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        controls_height = 30
+        total_height = self.height()
+        top_margin = int((total_height - controls_height) * 0.10)
+        self._main_layout.removeItem(self._top_spacer)
+        self._top_spacer = QSpacerItem(0, top_margin, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self._main_layout.insertItem(2, self._top_spacer)
+
+    def toggle_play_pause(self):
+        if self.media_player.state() == QMediaPlayer.PlayingState:
+            self.media_player.pause()
+        else:
+            self.preview_player_widget.show_video()
+            self.media_player.play()
+
+    def stop(self):
+        self.media_player.stop()
+        self.preview_player_widget.show_black()
+
+    def toggle_repeat(self):
+        self.repeat = not self.repeat
+        if self.repeat and QIcon(f"{ICON_PATH}/repeat-on.png").availableSizes():
+            self.repeat_btn.setIcon(self.repeat_on_icon)
+        else:
+            self.repeat_btn.setIcon(self.repeat_off_icon)
+
+    def toggle_mute(self):
+        self.muted = not self.muted
+        self.media_player.setMuted(self.muted)
+        if self.muted:
+            self.audio_btn.setIcon(self.audio_on_icon)
+        else:
+            self.audio_btn.setIcon(self.audio_off_icon)
+
+    def on_slider_pressed(self):
+        self._was_playing = self.media_player.state() == QMediaPlayer.PlayingState
+        self.media_player.pause()
+
+    def on_slider_released(self):
+        position = self.slider.value()
+        self.media_player.setPosition(position)
+        if self._was_playing:
+            self.preview_player_widget.show_video()
+            self.media_player.play()
+
+    def seek(self, position):
+        self.media_player.setPosition(position)
+        if self.media_player.state() == QMediaPlayer.PlayingState:
+            self.preview_player_widget.show_video()
+            self.media_player.play()
+
+    def update_slider(self, position):
+        self.slider.blockSignals(True)
+        self.slider.setValue(position)
+        self.slider.blockSignals(False)
+
+    def set_slider_range(self, duration):
+        self.slider.setRange(0, duration if duration > 0 else 0)
+
+    def on_media_status_changed(self, status):
+        if status == QMediaPlayer.EndOfMedia:
+            if self.repeat:
+                self.media_player.setPosition(0)
+                self.preview_player_widget.show_video()
+                self.media_player.play()
+            else:
+                self.preview_player_widget.show_black()
+
+    def on_state_changed(self, state):
+        if state == QMediaPlayer.PlayingState:
+            self.play_pause_btn.setIcon(self.pause_icon)
+        else:
+            self.play_pause_btn.setIcon(self.play_icon)
+
+class TimeRuler(QWidget):
+    def __init__(self, initial_view_seconds=10, ruler_name="خط تایم‌لاین", parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(28)
+        self.ruler_name = ruler_name
+        self.zoom_px_per_sec = None
+        self.min_zoom = 10
+        self.max_zoom = 400
+        self.scroll_offset_sec = 0
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.panning_active = False
+        self.pan_start = None
+        self.pan_start_offset = 0
+        self.initial_view_seconds = initial_view_seconds
+        self.dynamic_duration_sec = 3600
+
+    def setRulerName(self, name):
+        self.ruler_name = name
+        self.update()
+
+    def setViewSeconds(self, seconds):
+        self.initial_view_seconds = seconds
+        self.update()
+
+    def showEvent(self, event):
+        if self.zoom_px_per_sec is None:
+            width = self.width() if self.width() > 0 else 1
+            self.zoom_px_per_sec = max(self.min_zoom, min(self.max_zoom, width / self.initial_view_seconds))
+            self.update()
+        super().showEvent(event)
+
+    def resizeEvent(self, event):
+        if self.zoom_px_per_sec is None:
+            width = self.width() if self.width() > 0 else 1
+            self.zoom_px_per_sec = max(self.min_zoom, min(self.max_zoom, width / self.initial_view_seconds))
+            self.update()
+        super().resizeEvent(event)
+
+    def _get_label_interval(self, width, px_per_sec):
+        font = QFont("Arial", 9)
+        fm = QFontMetrics(font)
+        label_min_px = 48
+        candidate_intervals = [1, 2, 5, 10, 15, 20, 30, 50, 60, 120, 300, 600, 900, 1800, 3600]
+        for interval in candidate_intervals:
+            if px_per_sec * interval >= label_min_px:
+                return interval
+        return candidate_intervals[-1]
+
+    def ensure_duration_for_view(self, view_end_second):
+        while view_end_second >= self.dynamic_duration_sec:
+            self.dynamic_duration_sec += 3600
+
+    def paintEvent(self, event):
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.Antialiasing, False)
+        qp.fillRect(self.rect(), QColor("#18191b"))
+
+        rect = self.rect()
+        width = rect.width()
+        ruler_y = 0
+
+        text_color = QColor("#888")
+        tick_color = QColor("#444")
+        name_color = QColor("#bbb")
+
+        tick_long = 9
+        tick_short = 5
+        label_y = 19
+        name_y = rect.height() - 3
+
+        qp.setPen(tick_color)
+
+        second_px = self.zoom_px_per_sec if self.zoom_px_per_sec else 42
+
+        view_seconds = int(width / second_px)
+        if view_seconds < 1:
+            view_seconds = 1
+
+        first_sec = int(self.scroll_offset_sec)
+        last_sec = first_sec + view_seconds + 2
+
+        self.ensure_duration_for_view(last_sec)
+
+        label_interval = self._get_label_interval(width, second_px)
+
+        font = QFont("Arial", 9)
+        qp.setFont(font)
+        fm = QFontMetrics(font)
+
+        left_margin = int(second_px * 0.10)
+
+        for sec in range(first_sec, last_sec):
+            x = int((sec - self.scroll_offset_sec) * second_px) + left_margin
+            qp.setPen(tick_color)
+            qp.drawLine(x, ruler_y + 0, x, ruler_y + tick_long)
+            if sec % label_interval == 0:
+                qp.setPen(text_color)
+                timecode = f"|{sec//60:02d}:{sec%60:02d}"
+                text_width = fm.width(timecode)
+                qp.drawText(x - text_width // 2, ruler_y + label_y, timecode)
+            for i in range(1, 5):
+                sub_x = x + int(i * (second_px / 5))
+                qp.drawLine(sub_x, ruler_y + 0, sub_x, ruler_y + tick_short)
+
+        if self.ruler_name:
+            qp.setPen(name_color)
+            name_font = QFont("Arial", 8, QFont.Bold)
+            qp.setFont(name_font)
+            pad = 7 + left_margin
+            qp.drawText(pad, name_y, self.ruler_name)
+        qp.end()
+
+    def wheelEvent(self, event: QWheelEvent):
+        angle = event.angleDelta().y()
+        cursor_x = event.position().x()
+        width = self.width()
+        old_zoom = self.zoom_px_per_sec if self.zoom_px_per_sec else 42
+
+        if angle > 0:
+            self.zoom_px_per_sec = min(self.max_zoom, int(self.zoom_px_per_sec * 1.1))
+        else:
+            self.zoom_px_per_sec = max(self.min_zoom, int(self.zoom_px_per_sec / 1.1))
+
+        if width > 0:
+            sec_under_cursor = self.scroll_offset_sec + (cursor_x - int(self.zoom_px_per_sec * 0.10)) / old_zoom
+            self.scroll_offset_sec = max(0, sec_under_cursor - (cursor_x - int(self.zoom_px_per_sec * 0.10)) / self.zoom_px_per_sec)
+            view_seconds = int(width / self.zoom_px_per_sec)
+            self.ensure_duration_for_view(int(self.scroll_offset_sec) + view_seconds + 3600)
+        self.update()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MiddleButton:
+            self.panning_active = True
+            self.pan_start = event.x()
+            self.pan_start_offset = self.scroll_offset_sec
+            self.setCursor(Qt.ClosedHandCursor)
+        elif event.button() == Qt.LeftButton:
+            self.last_mouse_x = event.x()
+            self.last_offset = self.scroll_offset_sec
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if getattr(self, 'panning_active', False) and event.buttons() & Qt.MiddleButton:
+            dx = event.x() - self.pan_start
+            delta_sec = -dx / self.zoom_px_per_sec
+            new_offset = self.pan_start_offset + delta_sec
+            width = self.width()
+            view_seconds = int(width / self.zoom_px_per_sec)
+            self.ensure_duration_for_view(int(new_offset) + view_seconds + 2)
+            self.scroll_offset_sec = max(0, new_offset)
+            self.update()
+        elif event.buttons() & Qt.LeftButton:
+            dx = event.x() - self.last_mouse_x
+            delta_sec = -dx / self.zoom_px_per_sec
+            new_offset = self.last_offset + delta_sec
+            width = self.width()
+            view_seconds = int(width / self.zoom_px_per_sec)
+            self.ensure_duration_for_view(int(new_offset) + view_seconds + 2)
+            self.scroll_offset_sec = max(0, new_offset)
+            self.update()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MiddleButton:
+            self.panning_active = False
+            self.setCursor(Qt.ArrowCursor)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key_0 and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier)):
+            self.scroll_offset_sec = 0
+            self.update()
+        else:
+            super().keyPressEvent(event)
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle(QStyleFactory.create("Fusion"))
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
